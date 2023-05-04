@@ -9,14 +9,23 @@ unsigned char int_to_uint8(int value) {
 
 engine::engine() {
     window = SDL_CreateWindow("3D Eingine", 20, 20, Width, Height, SDL_WINDOW_SHOWN);
+    if (FullScreen)
+        SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     run = true;
     bg_color = vec3(100, 100, 210);
+    fog = 1000.f;
 
-    light_direction = norm(vec3(0.f, 0.f, -1.f));
+    //dir_lights.push_back(norm(vec3(0.f, 0.f, 1.f)));
+    lights.push_back(vec3(0, 0, -2));
 
     camera = vec3();
     camera_angle = vec3();
+    TTF_Init();
+    font = TTF_OpenFont("8bit.ttf", 24);
+
+    delta = 0;
+    tick = SDL_GetTicks();
 }
 
 engine::~engine() {
@@ -47,12 +56,20 @@ void engine::update(mesh &global_mesh) {
     for (int i = 0; i < global_mesh.t.size(); i++) {
         vec3 color = global_mesh.t[i].color;
         triangle trans_triangle = to_camera(global_mesh.t[i]);
-        vec3 n = norm(normal(trans_triangle));
-        vec3 camera_ray = trans_triangle.p[0] - camera;
+        vec3 n = norm(normal(global_mesh.t[i]));
+        vec3 camera_ray = trans_triangle.center() - camera;
         if (dot_product(n, camera_ray) < 0.f) {
-            float dp = min(max(0.1f, dot_product(light_direction, n)), 1.f);
 
+            float dp = 0.f;
+            for (vec3 l : dir_lights)
+                dp += map(dot_product(l * -1.f, n), -1.f, 1.f, 0.f, 1.f);
+            for (vec3 l : lights) {
+                vec3 dir = norm(global_mesh.t[i].center() - l);
+                dp += map(dot_product(dir * -1.f, n), -1.f, 1.f, 0.f, 1.f);
+            }
+            dp = min(dp, 1.f);
             color = color * dp;
+            color = bland(color, bg_color, global_mesh.t[i].dist(camera) / fog);
 
             int_vec2 points[3];
             vec2 uv[3];
@@ -71,6 +88,9 @@ void engine::update(mesh &global_mesh) {
 
     global_mesh.t.clear();
 
+    long long t = SDL_GetTicks();
+    delta = t - tick;
+    tick = t;
 }
 
 engine::int_vec2 engine::render(vec3 p) {
@@ -174,7 +194,7 @@ void engine::draw_triangle(int_vec2 a, int_vec2 b, int_vec2 c, vec3 color) {
     SDL_RenderGeometry( renderer, nullptr, verts.data(), verts.size(), nullptr, 0 );
 }
 
-void heapify(vector<engine::triangle> &t, int N, int i)
+void engine::heapify(vector<triangle> &t, int N, int i)
 {
     // Find largest among root, left child and right child
  
@@ -186,15 +206,15 @@ void heapify(vector<engine::triangle> &t, int N, int i)
  
     // right = 2*i + 2
     int right = 2 * i + 2;
- 
+
     // If left child is larger than root
-    if (left < N && t[left].center().z < t[largest].center().z)
+    if (left < N && t[left].sqr_dist(camera) < t[largest].sqr_dist(camera))
  
         largest = left;
  
     // If right child is larger than largest
     // so far
-    if (right < N && t[right].center().z < t[largest].center().z)
+    if (right < N && t[right].sqr_dist(camera) < t[largest].sqr_dist(camera))
  
         largest = right;
  
@@ -257,31 +277,65 @@ engine::vec3 engine::norm(vec3 a) {
     return a / length(vec3(), a);
 }
 
+engine::vec3 engine::rotate_x(vec3 c, float angle, vec3 p) {
+    float sn = sin(angle);
+    float cs = cos(angle);
+
+    p.z -= c.z;
+    p.y -= c.y;
+
+    float znew = p.z * cs - p.y * sn;
+    float ynew = p.z * sn + p.y * cs;
+
+    p.y = ynew + c.y;
+    p.z = znew + c.z;
+    return p;
+}
+
 engine::vec3 engine::rotate_y(vec3 c, float angle, vec3 p) {
     float sn = sin(angle);
     float cs = cos(angle);
 
-    p.x -= c.x;
     p.z -= c.z;
+    p.x -= c.x;
 
-    float xnew = p.x * cs - p.z * sn;
-    float znew = p.x * sn + p.z * cs;
+    float znew = p.z * cs - p.x * sn;
+    float xnew = p.z * sn + p.x * cs;
 
     p.x = xnew + c.x;
     p.z = znew + c.z;
     return p;
 }
 
+engine::vec3 engine::rotate_z(vec3 c, float angle, vec3 p) {
+    float sn = sin(angle);
+    float cs = cos(angle);
+
+    p.x -= c.x;
+    p.y -= c.y;
+
+    float xnew = p.x * cs - p.y * sn;
+    float ynew = p.x * sn + p.y * cs;
+
+    p.y = ynew + c.y;
+    p.x = xnew + c.x;
+    return p;
+}
+
 engine::triangle engine::to_camera(triangle t) {
     for (int i = 0; i < 3; i++) {
+        t.p[i] = rotate_x(camera, -camera_angle.x, t.p[i]);
         t.p[i] = rotate_y(camera, -camera_angle.y, t.p[i]);
+        t.p[i] = rotate_z(camera, -camera_angle.z, t.p[i]);
         t.p[i] = t.p[i] - camera;
     }
     return t;
 }
 
 engine::vec3 engine::to_camera(vec3 p) {
+    p = rotate_x(camera, -camera_angle.x, p);
     p = rotate_y(camera, -camera_angle.y, p);
+    p = rotate_z(camera, -camera_angle.z, p);
     p = p - camera;
     return p;
 }
@@ -362,7 +416,6 @@ void engine::mesh::LoadFromPNG(SDL_Renderer *renderer, string file) {
     texture = SDL_CreateTextureFromSurface(renderer, surface);
     if (texture == NULL)
         cout << "texture Error" << endl;
-    textured = true;
     for (int i = 0; i < t.size(); i++) {
         t[i].textured = true;
         t[i].texture = &texture;
@@ -385,21 +438,62 @@ void engine::draw_textured_triangle(int_vec2 p[3], vec2 uv[3], SDL_Texture *text
 
     verts[0].position.x = p[0].x;
     verts[0].position.y = p[0].y;
-    verts[0].tex_coord.x = (uv[0].x);
-    verts[0].tex_coord.y = (uv[0].y);
+    verts[0].tex_coord.x = uv[0].x;
+    verts[0].tex_coord.y = uv[0].y;
     verts[0].color = c;
 
     verts[1].position.x = p[1].x;
     verts[1].position.y = p[1].y;
-    verts[1].tex_coord.x = (uv[1].x);
-    verts[1].tex_coord.y = (uv[1].y);
+    verts[1].tex_coord.x = uv[1].x;
+    verts[1].tex_coord.y = uv[1].y;
     verts[1].color = c;
 
     verts[2].position.x = p[2].x;
     verts[2].position.y = p[2].y;
-    verts[2].tex_coord.x = (uv[2].x);
-    verts[2].tex_coord.y = (uv[2].y);
+    verts[2].tex_coord.x = uv[2].x;
+    verts[2].tex_coord.y = uv[2].y;
     verts[2].color = c;
-    //draw_texture(texture, 100, 100);
     SDL_RenderGeometry(renderer, texture, verts, 3, NULL, 0);
+}
+
+void engine::draw_text(string text,int x, int y, vec3 color) {
+    SDL_Surface *m_surface;
+
+    int texture_width, texture_height;
+
+    SDL_Color Color = {int_to_uint8(color.x), int_to_uint8(color.y), int_to_uint8(color.z), 0};
+    m_surface = TTF_RenderText_Solid(font, text.c_str(),Color);
+
+    text_texture = SDL_CreateTextureFromSurface(renderer, m_surface);
+    
+    texture_height = m_surface->h;
+    texture_width = m_surface->w;
+
+    SDL_FreeSurface(m_surface);
+
+    text_rectangle.x = x;
+    text_rectangle.y = y;
+    text_rectangle.w = texture_width;
+    text_rectangle.h = texture_height;   
+
+    SDL_RenderCopy(renderer, text_texture,NULL, &text_rectangle);
+    if(text_texture != nullptr){
+        SDL_DestroyTexture(text_texture);
+    }
+}
+
+void engine::LoadFont(string path) {
+    font = TTF_OpenFont(path.c_str(), 24);
+}
+
+engine::vec3 engine::bland(vec3 col1, vec3 col2, float per) {
+    per = max(min(per, 1.f), 0.f);
+    col1 = col1 * (1.f - per);
+    col2 = col2 * per;
+    col1 = col1 + col2;
+    return col1;
+}
+
+float engine::map(float value, float a1, float b1, float a2, float b2) {
+    return ((value - a1) / (b1 - a1)) * (b2 - a2) + a2;
 }
